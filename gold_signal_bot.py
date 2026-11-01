@@ -162,7 +162,7 @@ def fetch():
             if len(rows) < TREND + 25:
                 raise ValueError("шам сони кам: " + str(len(rows)))
             SOURCE = sym
-            LIVE_PRICE = res.get("meta", {}).get("regularMarketPrice") or rows[-1][3]
+            LIVE_PRICE =rows[-2][3]  # res.get("meta", {}).get("regularMarketPrice") or rows[-1][3]
             return rows[:-1]  # охирги шам ҳали шаклланяпти — олиб ташлаймиз
         except Exception as e:
             errors.append(host + " " + sym + ": " + str(e))
