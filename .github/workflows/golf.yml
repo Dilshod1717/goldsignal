@@ -1,1 +1,40 @@
 
+name: Gold signal
+
+on:
+  schedule:
+    - cron: "*/15 6-17 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-signal
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Signalni tekshirish
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python gold_signal_bot.py once
+
+      - name: Holatni saqlash
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "gold-bot"
+            git config user.email "gold-bot@users.noreply.github.com"
+            git add state.json
+            git commit -m "state"
+            git push
+          fi
