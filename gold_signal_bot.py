@@ -5,6 +5,9 @@
 Стратегия: 9/21 EMA кесишуви + 200 EMA тренд + RSI + ADX + Лондон сессияси.
 Фақат Python стандарт кутубхонаси керак (pip ўрнатиш шарт эмас).
 Бот савдо очмайди, фақат Telegram'га сигнал юборади.
+
+Ишга тушириш:   python gold_signal_bot.py
+Синаш:          python gold_signal_bot.py test
 """
 import json
 import os
@@ -17,31 +20,38 @@ from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo
     LONDON = ZoneInfo("Europe/London")
-except Exception:
+except Exception:  # zoneinfo ёки tzdata йўқ бўлса
     LONDON = None
 
 # ================== СОЗЛАМАЛАР ==================
-BOT_TOKEN = "ВАШ_ТОКЕН"
-CHAT_ID = "ВАШ_CHAT_ID"
+BOT_TOKEN = "ВАШ_ТОКЕН"      # @BotFather берган токен
+CHAT_ID = "ВАШ_CHAT_ID"      # @userinfobot берган рақам
 
-SYMBOL = "XAUUSD=X"          # заҳира: GC=F
+SYMBOL = "XAUUSD=X"          # агар маълумот чиқмаса: "GC=F"
 INTERVAL = "15m"             # "15m" ёки "30m"
-CHECK_SECONDS = 60
+CHECK_SECONDS = 60           # неча секундда текшириш
 
 FAST, SLOW, TREND = 9, 21, 200
 RSI_LEN, ATR_LEN, ADX_LEN = 14, 14, 14
 ADX_MIN = 20.0
-SL_MULT = 1.5
-RR = 2.0
-SESSION_START, SESSION_END = 7, 17   # Лондон вақти
+SL_MULT = 1.5                # Stop-Loss = ATR x 1.5
+RR = 2.0                     # Take-Profit = SL x 2
+SESSION_START, SESSION_END = 7, 17   # Лондон вақти (соат)
 # =================================================
 
+# GitHub Actions'да токен махфий созламалардан (Secrets) келади
 BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
 CHAT_ID = os.environ.get("CHAT_ID", CHAT_ID)
 STATE_FILE = "state.json"
+API_BASE = "https://api.telegram.org/bot"
+
+# Брокер ва бот нархи фарқи (брокер - бот). Telegram'да /offset орқали ўрнатилади.
+OFFSET = 0.0
+OFFSET_SET = False
+LIVE_PRICE = None
 
 
-# ---------- Индикаторлар ----------
+# ---------- Индикаторлар (соф Python) ----------
 def ema(vals, n):
     out = [None] * len(vals)
     if len(vals) < n:
@@ -56,6 +66,7 @@ def ema(vals, n):
 
 
 def rma(vals, n):
+    """Wilder силлиқлаш (RSI, ATR, ADX учун). Бошидаги None'лар рухсат."""
     out = [None] * len(vals)
     start = next((i for i, v in enumerate(vals) if v is not None), None)
     if start is None or len(vals) - start < n:
@@ -124,9 +135,9 @@ SOURCE = SYMBOL
 
 
 def fetch():
-    """Yahoo Finance'дан ёпилган шамлар: [(vaqt, high, low, close), ...]
+    """Yahoo Finance'дан ёпилган шамларни олади: [(vaqt, high, low, close), ...]
     Бир нечта манзил ва заҳира тикерни кетма-кет синайди."""
-    global SOURCE
+    global SOURCE, LIVE_PRICE
     candidates = []
     for sym in (SYMBOL, "GC=F"):
         for host in ("query1", "query2"):
@@ -151,7 +162,8 @@ def fetch():
             if len(rows) < TREND + 25:
                 raise ValueError("шам сони кам: " + str(len(rows)))
             SOURCE = sym
-            return rows[:-1]
+            LIVE_PRICE = res.get("meta", {}).get("regularMarketPrice") or rows[-1][3]
+            return rows[:-1]  # охирги шам ҳали шаклланяпти — олиб ташлаймиз
         except Exception as e:
             errors.append(host + " " + sym + ": " + str(e))
     raise RuntimeError("Нарх олиб бўлмади -> " + " | ".join(errors))
@@ -173,6 +185,7 @@ def in_session(ts):
 
 # ---------- Таҳлил ----------
 def analyze(rows):
+    """Охирги ёпилган шам бўйича сигнални қайтаради (ёки None) ва индикатор қийматлари."""
     if len(rows) < TREND + 20:
         return None, None
     ts = [r[0] for r in rows]
@@ -215,25 +228,86 @@ def analyze(rows):
     return sig, info
 
 
-def format_signal(s):
+def format_signal(s, age_min=0):
     icon = "🟢" if s["side"] == "BUY" else "🔴"
-    return (
-        f"{icon} {s['side']} ОЛТИН (XAUUSD) {INTERVAL}\n"
-        f"Кириш: {s['entry']:.2f}\n"
-        f"Stop-Loss: {s['sl']:.2f}  (масофа {s['sl_dist']:.2f}$)\n"
-        f"Take-Profit: {s['tp']:.2f}  (масофа {s['tp_dist']:.2f}$)\n"
-        f"RSI: {s['rsi']:.0f} | ADX: {s['adx']:.0f} | Манба: {SOURCE}\n\n"
-        f"Эслатма: нарх брокерингиздагидан бироз фарқ қилиши мумкин. "
-        f"SL/TP ни МАСОФА бўйича қўйинг. Риск: депозитнинг 1-2%и."
-    )
+    lines = [
+        f"{icon} {s['side']} ОЛТИН (XAUUSD) {INTERVAL}",
+        f"Сигнал ёши: {age_min} дақиқа",
+        "",
+        "МАСОФА (асосий, шуни ишлатинг):",
+        f"Stop-Loss: {s['sl_dist']:.2f}$",
+        f"Take-Profit: {s['tp_dist']:.2f}$",
+        "",
+    ]
+    if OFFSET_SET:
+        lines += [
+            f"Брокер учун тахминий нарх (фарқ {OFFSET:+.2f} ҳисобга олинган):",
+            f"Кириш: ~{s['entry'] + OFFSET:.2f}",
+            f"Stop-Loss: ~{s['sl'] + OFFSET:.2f}",
+            f"Take-Profit: ~{s['tp'] + OFFSET:.2f}",
+            "",
+            "Кириш нархини MT5 даги ЖОРИЙ нархдан олинг, SL/TP ни масофа бўйича қўйинг.",
+        ]
+    else:
+        lines += [
+            f"Бот нархи ({SOURCE}): {s['entry']:.2f}",
+            "Брокер нархидан фарқ бор. MT5 даги жорий нархдан масофа бўйича ҳисобланг.",
+            "Фарқни ўргатиш: ботга /offset ЯНГИ_ФАРҚ юборинг (брокер минус бот).",
+        ]
+    lines += [f"RSI: {s['rsi']:.0f} | ADX: {s['adx']:.0f}",
+              "Риск: депозитнинг 1-2%и."]
+    return "\n".join(lines)
 
 
 def interval_seconds():
     return 1800 if INTERVAL == "30m" else 900
 
 
+def process_commands(state):
+    """Telegram'даги /offset буйруқларини ўқийди. Ўзгариш бўлса True қайтаради."""
+    try:
+        url = (API_BASE + BOT_TOKEN + "/getUpdates?timeout=0&offset="
+               + str(state.get("tg_offset", 0)))
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = json.load(r)
+    except Exception as e:
+        print("getUpdates хато:", e)
+        return False
+
+    changed = False
+    for upd in data.get("result", []):
+        state["tg_offset"] = upd["update_id"] + 1
+        changed = True
+        msg = upd.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(CHAT_ID):
+            continue
+        parts = (msg.get("text") or "").strip().replace(",", ".").split()
+        if not parts or parts[0].lower().split("@")[0] != "/offset":
+            continue
+        live = f"{LIVE_PRICE:.2f}" if LIVE_PRICE else "?"
+        if len(parts) == 1:
+            cur = f"{state['offset']:+.2f}" if "offset" in state else "ўрнатилмаган"
+            send(f"Ҳозирги фарқ: {cur}. Ботнинг жорий нархи: {live}.\n"
+                 f"Ўрнатиш: /offset -6.8 (брокер нархи минус бот нархи).")
+            continue
+        try:
+            val = float(parts[1])
+            if abs(val) > 50:
+                raise ValueError
+        except ValueError:
+            send("Нотўғри қиймат. Мисол: /offset -6.8 (-50 дан 50 гача).")
+            continue
+        state["offset"] = val
+        approx = f"{LIVE_PRICE + val:.2f}" if LIVE_PRICE else "?"
+        send(f"✅ Фарқ сақланди: {val:+.2f}\n"
+             f"Ботнинг жорий нархи: {live} → брокер учун тахминан {approx}.\n"
+             f"Шуни MT5 билан солиштиринг.")
+    return changed
+
+
 def run_once():
-    """Бир марта текширади (GitHub Actions учун)."""
+    """Бир марта текширади (GitHub Actions учун). Ҳолатни state.json'да сақлайди."""
+    global OFFSET, OFFSET_SET
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             state = json.load(f)
@@ -243,8 +317,10 @@ def run_once():
 
     rows = fetch()
     now = time.time()
-    changed = False
-    for k in range(3, -1, -1):
+    changed = process_commands(state)
+    if "offset" in state:
+        OFFSET, OFFSET_SET = float(state["offset"]), True
+    for k in range(3, -1, -1):  # охирги 4 та шам: эскисидан янгисига
         part = rows[:len(rows) - k]
         if len(part) < TREND + 20:
             continue
@@ -252,7 +328,7 @@ def run_once():
         bar_ts = part[-1][0]
         close_time = bar_ts + interval_seconds()
         if sig and bar_ts > last_sent and now - close_time <= 3600:
-            send(format_signal(sig))
+            send(format_signal(sig, int(max(now - close_time, 0) // 60)))
             last_sent = bar_ts
             changed = True
             print("Сигнал юборилди:", sig["side"], sig["entry"])
@@ -280,7 +356,8 @@ def main():
         print("Индикаторлар:", info)
         send("✅ Тест: бот Telegram'га уланди. Нарх: "
              + (f"{info['close']:.2f}" if info else "маълумот етарли эмас")
-             + " (манба: " + SOURCE + ")")
+             + " (манба: " + SOURCE + ")\n"
+             + "MT5 нархи билан фарқ бўлса: /offset -6.8 деб юборинг (брокер минус бот).")
         return
 
     send("✅ Олтин сигнал боти ишга тушди (" + SYMBOL + ", " + INTERVAL + ").")
@@ -293,7 +370,7 @@ def main():
             if ts != last_ts:
                 last_ts = ts
                 if first:
-                    first = False
+                    first = False   # эски сигналларни юбормаслик учун
                 else:
                     sig, _ = analyze(rows)
                     if sig:
