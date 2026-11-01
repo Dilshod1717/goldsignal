@@ -5,9 +5,6 @@
 Стратегия: 9/21 EMA кесишуви + 200 EMA тренд + RSI + ADX + Лондон сессияси.
 Фақат Python стандарт кутубхонаси керак (pip ўрнатиш шарт эмас).
 Бот савдо очмайди, фақат Telegram'га сигнал юборади.
-
-Ишга тушириш:   python gold_signal_bot.py
-Синаш:          python gold_signal_bot.py test
 """
 import json
 import os
@@ -20,32 +17,31 @@ from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo
     LONDON = ZoneInfo("Europe/London")
-except Exception:  # zoneinfo ёки tzdata йўқ бўлса
+except Exception:
     LONDON = None
 
 # ================== СОЗЛАМАЛАР ==================
-BOT_TOKEN = "ВАШ_ТОКЕН"      # @BotFather берган токен
-CHAT_ID = "ВАШ_CHAT_ID"      # @userinfobot берган рақам
+BOT_TOKEN = "ВАШ_ТОКЕН"
+CHAT_ID = "ВАШ_CHAT_ID"
 
-SYMBOL = "XAUUSD=X"          # агар маълумот чиқмаса: "GC=F"
+SYMBOL = "XAUUSD=X"          # заҳира: GC=F
 INTERVAL = "15m"             # "15m" ёки "30m"
-CHECK_SECONDS = 60           # неча секундда текшириш
+CHECK_SECONDS = 60
 
 FAST, SLOW, TREND = 9, 21, 200
 RSI_LEN, ATR_LEN, ADX_LEN = 14, 14, 14
 ADX_MIN = 20.0
-SL_MULT = 1.5                # Stop-Loss = ATR x 1.5
-RR = 2.0                     # Take-Profit = SL x 2
-SESSION_START, SESSION_END = 7, 17   # Лондон вақти (соат)
+SL_MULT = 1.5
+RR = 2.0
+SESSION_START, SESSION_END = 7, 17   # Лондон вақти
 # =================================================
 
-# GitHub Actions'да токен махфий созламалардан (Secrets) келади
 BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
 CHAT_ID = os.environ.get("CHAT_ID", CHAT_ID)
 STATE_FILE = "state.json"
 
 
-# ---------- Индикаторлар (соф Python) ----------
+# ---------- Индикаторлар ----------
 def ema(vals, n):
     out = [None] * len(vals)
     if len(vals) < n:
@@ -60,7 +56,6 @@ def ema(vals, n):
 
 
 def rma(vals, n):
-    """Wilder силлиқлаш (RSI, ATR, ADX учун). Бошидаги None'лар рухсат."""
     out = [None] * len(vals)
     start = next((i for i, v in enumerate(vals) if v is not None), None)
     if start is None or len(vals) - start < n:
@@ -125,19 +120,41 @@ def adx(highs, lows, closes, n):
 
 
 # ---------- Маълумот ва Telegram ----------
+SOURCE = SYMBOL
+
+
 def fetch():
-    """Yahoo Finance'дан ёпилган шамларни олади: [(vaqt, high, low, close), ...]"""
-    url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
-           + urllib.parse.quote(SYMBOL) + "?interval=" + INTERVAL + "&range=10d")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = json.load(r)
-    res = data["chart"]["result"][0]
-    q = res["indicators"]["quote"][0]
-    rows = [(t, h, l, c) for t, h, l, c in
-            zip(res["timestamp"], q["high"], q["low"], q["close"])
-            if h is not None and l is not None and c is not None]
-    return rows[:-1]  # охирги шам ҳали шаклланяпти — олиб ташлаймиз
+    """Yahoo Finance'дан ёпилган шамлар: [(vaqt, high, low, close), ...]
+    Бир нечта манзил ва заҳира тикерни кетма-кет синайди."""
+    global SOURCE
+    candidates = []
+    for sym in (SYMBOL, "GC=F"):
+        for host in ("query1", "query2"):
+            if (host, sym) not in candidates:
+                candidates.append((host, sym))
+    errors = []
+    for host, sym in candidates:
+        url = ("https://" + host + ".finance.yahoo.com/v8/finance/chart/"
+               + urllib.parse.quote(sym, safe="=") + "?interval=" + INTERVAL + "&range=10d")
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = json.load(r)
+            res = data["chart"]["result"][0]
+            q = res["indicators"]["quote"][0]
+            rows = [(t, h, l, c) for t, h, l, c in
+                    zip(res["timestamp"], q["high"], q["low"], q["close"])
+                    if h is not None and l is not None and c is not None]
+            if len(rows) < TREND + 25:
+                raise ValueError("шам сони кам: " + str(len(rows)))
+            SOURCE = sym
+            return rows[:-1]
+        except Exception as e:
+            errors.append(host + " " + sym + ": " + str(e))
+    raise RuntimeError("Нарх олиб бўлмади -> " + " | ".join(errors))
 
 
 def send(text):
@@ -156,7 +173,6 @@ def in_session(ts):
 
 # ---------- Таҳлил ----------
 def analyze(rows):
-    """Охирги ёпилган шам бўйича сигнални қайтаради (ёки None) ва индикатор қийматлари."""
     if len(rows) < TREND + 20:
         return None, None
     ts = [r[0] for r in rows]
@@ -206,7 +222,7 @@ def format_signal(s):
         f"Кириш: {s['entry']:.2f}\n"
         f"Stop-Loss: {s['sl']:.2f}  (масофа {s['sl_dist']:.2f}$)\n"
         f"Take-Profit: {s['tp']:.2f}  (масофа {s['tp_dist']:.2f}$)\n"
-        f"RSI: {s['rsi']:.0f} | ADX: {s['adx']:.0f}\n\n"
+        f"RSI: {s['rsi']:.0f} | ADX: {s['adx']:.0f} | Манба: {SOURCE}\n\n"
         f"Эслатма: нарх брокерингиздагидан бироз фарқ қилиши мумкин. "
         f"SL/TP ни МАСОФА бўйича қўйинг. Риск: депозитнинг 1-2%и."
     )
@@ -217,7 +233,7 @@ def interval_seconds():
 
 
 def run_once():
-    """Бир марта текширади (GitHub Actions учун). Такрорий сигналдан state.json сақлайди."""
+    """Бир марта текширади (GitHub Actions учун)."""
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             state = json.load(f)
@@ -228,7 +244,7 @@ def run_once():
     rows = fetch()
     now = time.time()
     changed = False
-    for k in range(3, -1, -1):  # охирги 4 та шам: эскисидан янгисига
+    for k in range(3, -1, -1):
         part = rows[:len(rows) - k]
         if len(part) < TREND + 20:
             continue
@@ -245,7 +261,7 @@ def run_once():
         state["last_signal_ts"] = last_sent
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f)
-    print("Текширув тугади. Шам сони:", len(rows))
+    print("Текширув тугади. Шам сони:", len(rows), "Манба:", SOURCE)
 
 
 def main():
@@ -263,7 +279,8 @@ def main():
         print("Шам сони:", len(rows))
         print("Индикаторлар:", info)
         send("✅ Тест: бот Telegram'га уланди. Нарх: "
-             + (f"{info['close']:.2f}" if info else "маълумот етарли эмас"))
+             + (f"{info['close']:.2f}" if info else "маълумот етарли эмас")
+             + " (манба: " + SOURCE + ")")
         return
 
     send("✅ Олтин сигнал боти ишга тушди (" + SYMBOL + ", " + INTERVAL + ").")
@@ -276,7 +293,7 @@ def main():
             if ts != last_ts:
                 last_ts = ts
                 if first:
-                    first = False   # эски сигналларни юбормаслик учун
+                    first = False
                 else:
                     sig, _ = analyze(rows)
                     if sig:
